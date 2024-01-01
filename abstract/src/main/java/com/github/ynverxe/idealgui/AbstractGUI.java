@@ -189,6 +189,10 @@ public abstract class AbstractGUI<Viewer, Item, Click, G extends AbstractGUI<?, 
 
     if (cancel) return false;
 
+    if (!openHandler.test(castThis(), viewer)) {
+      return false;
+    }
+
     boolean added = viewers.add(viewer);
 
     if (added) {
