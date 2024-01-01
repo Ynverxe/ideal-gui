@@ -10,7 +10,7 @@ public abstract class BaseItemProvider<Item, Click, I extends ItemProvider<Item,
 
   @Override
   public @NotNull ClickableItem<Item, Click> lastCached() {
-    return lastCached.withClickHandler((item, click) -> cancelClick);
+    return lastCached.composeClickHandler((item, click) -> cancelClick);
   }
 
   @Contract("_ -> this")
