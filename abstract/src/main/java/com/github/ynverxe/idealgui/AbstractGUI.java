@@ -1,5 +1,13 @@
 package com.github.ynverxe.idealgui;
 
+import com.github.ynverxe.idealgui.gui.Pagination;
+import com.github.ynverxe.idealgui.gui.render.ComposedGUIRenderer;
+import com.github.ynverxe.idealgui.gui.TickableGUI;
+import com.github.ynverxe.idealgui.gui.render.ItemRelocator;
+import com.github.ynverxe.idealgui.item.object.ClickableItem;
+import com.github.ynverxe.idealgui.item.manager.ItemContainer;
+import com.github.ynverxe.idealgui.item.manager.ItemHolder;
+import com.github.ynverxe.idealgui.item.object.ItemProvider;
 import net.kyori.adventure.text.Component;
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
@@ -7,35 +15,31 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReadWriteLock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.*;
 
 @ApiStatus.NonExtendable
-@SuppressWarnings("rawtypes")
-public abstract class AbstractGUI<Viewer, Item, Click, G extends GUI, Handle>
+public abstract class AbstractGUI<Viewer, Item, Click, G extends AbstractGUI<?, ?, ?, ?, ?>, Handle>
   implements TickableGUI<Viewer, Item, Click, G, Handle> {
 
   protected Handle handle;
   private final @NotNull GUIDesignType type;
 
-  // Concurrency for inventory updates
-  private final ReadWriteLock readWriteLock = new ReentrantReadWriteLock();
-  private final Lock readLock = readWriteLock.readLock();
-  private final Lock writeLock = readWriteLock.writeLock();
+  // slots
+  private final @NotNull ComposedGUIRenderer<Item, Click, G> guiRenderer = new ComposedGUIRenderer<>(castThis());
 
   // title
-  private @NotNull Component title = Component.empty();
+  private volatile @NotNull Component title = Component.empty();
 
   // items
-  private ClickableItem<Item, Click>[] items;
-  final ItemRenderHandler rendererHandler;
+  private final ItemContainer.Accumulative<Item, Click, G> dynamicItemContainer;
+  private final ItemContainer<Item, Click, G> staticItems;
+  final RenderCache<Item, Click> renderCache;
+  private boolean relocateItems;
 
   // event handlers
   private final BiPredicate<G, Viewer> openHandler;
   private final BiConsumer<G, Viewer> closeHandler;
-  private final BiPredicate<G, Click> clickHandler;
+  private final BiPredicate<Item, Click> clickHandler;
 
   // tickers
   private final Map<String, Consumer<G>> tickers = new ConcurrentHashMap<>();
@@ -46,113 +50,28 @@ public abstract class AbstractGUI<Viewer, Item, Click, G extends GUI, Handle>
   // pages
   private final Pagination pagination;
 
-  @SuppressWarnings("unchecked")
-  protected AbstractGUI(@NotNull GUIDesignType type, BiPredicate<G, Viewer> openHandler, BiConsumer<G, Viewer> closeHandler, BiPredicate<G, Click> clickHandler) {
+  private final Map<String, Object> properties = new ConcurrentHashMap<>();
+
+  protected AbstractGUI(@NotNull GUIDesignType type, BiPredicate<G, Viewer> openHandler, BiConsumer<G, Viewer> closeHandler, BiPredicate<Item, Click> clickHandler) {
     this.type = type;
-    this.items = new ClickableItem[type.capacity()];
-    this.rendererHandler = new ItemRenderHandler(type);
+    this.renderCache = new RenderCache<>(this);
     this.openHandler = openHandler;
     this.closeHandler = closeHandler;
     this.clickHandler = clickHandler;
     this.pagination = new PaginationImpl(this);
+    this.dynamicItemContainer = new BaseItemContainer.AccumulativeImpl<>(castThis());
+    this.staticItems = new BaseItemContainer.PreSizedItemContainer<>(castThis());
   }
 
   @Override
   public @NotNull Component showingTitle() {
-    return read(() -> title);
+    return title;
   }
 
   @Override
   public @NotNull G title(@NotNull Component component) {
-    write(() -> {
-      Component old = this.title;
-      this.title = component;
-
-      sendTitleUpdate(old, component);
-    });
-
-    return castThis();
-  }
-
-  @SafeVarargs
-  @Override
-  public final @NotNull G contents(ClickableItem<Item, Click> @NotNull ... items) {
-    write(() -> {
-      int currentPageIndex = pagination.index();
-
-      this.items = Arrays.copyOf(items, items.length);
-
-      int newPage = Math.min(currentPageIndex, pagination.length() - 1);
-      rendererHandler.renderPage(newPage);
-    });
-
-    return castThis();
-  }
-
-  @Override
-  @SuppressWarnings("unchecked")
-  public @NotNull G contents(@NotNull Collection<ClickableItem<Item, Click>> clickableItems) {
-    write(() -> {
-      int currentPageIndex = pagination.index();
-
-      this.items = clickableItems.toArray(new ClickableItem[0]);
-
-      int newPage = Math.min(currentPageIndex, pagination.length() - 1);
-      rendererHandler.renderPage(newPage);
-    });
-
-    return castThis();
-  }
-
-  @Override
-  public @NotNull G clickableItem(@NotNull ClickableItem<Item, Click> item, int index) {
-    write(() -> {
-      if (items.length <= index) {
-        this.items = Arrays.copyOfRange(items, 0, index + 1);
-      }
-
-      items[index] = item;
-
-      rendererHandler.render(index, item);
-    });
-
-    return castThis();
-  }
-
-  @Override
-  public @NotNull G clickableItemAddition(
-    int startIndex, @NotNull Collection<ClickableItem<Item, Click>> toAdd, @NotNull AdditionType type) {
-    write(() -> this.items = type.performAddition(startIndex, this.items, toAdd));
-    return castThis();
-  }
-
-  @Override
-  public @NotNull G removeItem(int index) {
-    write(() -> performItemRemove(index));
-    return castThis();
-  }
-
-  @Override
-  public @NotNull G removeItemsIf(@NotNull BiPredicate<Integer, @Nullable ClickableItem<Item, Click>> filter) {
-    write(() -> {
-      for (int i = 0; i < this.items.length; i++) {
-        if (filter.test(i, items[i])) {
-          performItemRemove(i);
-        }
-      }
-    });
-
-    return castThis();
-  }
-
-  @Override
-  public @NotNull G removeItems(int from, int count) {
-    write(() -> {
-      for (int i = 0; i < count; i++) {
-        performItemRemove(i);
-      }
-    });
-
+    this.title = component;
+    sendTitleUpdate(component);
     return castThis();
   }
 
@@ -167,12 +86,14 @@ public abstract class AbstractGUI<Viewer, Item, Click, G extends GUI, Handle>
   }
 
   @Override
-  public @NotNull BiPredicate<G, Click> clickHandler() {
+  public @NotNull BiPredicate<Item, Click> clickHandler() {
     return clickHandler;
   }
 
   @Override
   public void tick() {
+    tickProviders();
+
     tickers.forEach((key, ticker) -> {
       try {
         ticker.accept(castThis());
@@ -213,72 +134,36 @@ public abstract class AbstractGUI<Viewer, Item, Click, G extends GUI, Handle>
   }
 
   @Override
-  public int reduceCapacity() {
-    synchronized (this) {
-      int toReduce = 0;
-
-      for (int i = items.length - 1; i >= 0; i--) {
-        if (items[i] != null) break;
-
-        toReduce++;
-      }
-
-      if (toReduce != 0) {
-        this.items = Arrays.copyOfRange(items, 0, items.length - toReduce);
-      }
-
-      return toReduce;
-    }
-  }
-
-  @Override
   public @NotNull Pagination pagination() {
     return pagination;
   }
 
   @Override
-  public @Nullable ClickableItem<Item, Click> getItem(int index) {
-    checkIndex(index);
-
-    return read(() -> items[index]);
+  public @NotNull ItemHolder<Item, Click> renderedItemsView() {
+    return renderCache;
   }
 
   @Override
-  public @NotNull Map<Integer, @Nullable ClickableItem<Item, Click>> itemsSnapshot() {
-    return read(() -> {
-      LinkedHashMap<Integer, ClickableItem<Item, Click>> items = new LinkedHashMap<>();
-
-      for (int i = 0; i < this.items.length; i++) {
-        items.put(i, this.items[i]);
-      }
-
-      return items;
-    });
+  public @NotNull ItemContainer<Item, Click, G> staticItems() {
+    return staticItems;
   }
 
   @Override
-  public @NotNull List<ClickableItem<Item, Click>> collectItems(int fromIndex, int count) {
-    return read(() -> {
-      checkIndex(fromIndex);
-
-      List<ClickableItem<Item, Click>> collected = new ArrayList<>();
-
-      for (int i = 0; i < count; i++) {
-        collected.add(this.items[fromIndex + i]);
-      }
-
-      return collected;
-    });
+  public ItemContainer.@NotNull Accumulative<Item, Click, G> items() {
+    return dynamicItemContainer;
   }
 
   @Override
-  public int itemCount() {
-    return read(() -> items.length);
+  public @NotNull G relocateItems(boolean relocate) {
+    if (this.relocateItems == relocate) return castThis();
+    this.relocateItems = relocate;
+    renderContents();
+    return castThis();
   }
 
   @Override
-  public @NotNull List<ClickableItem<Item, Click>> renderedItemsView() {
-    return Arrays.asList(rendererHandler.rendered);
+  public @NotNull ComposedGUIRenderer<Item, Click, G> renderer() {
+    return guiRenderer;
   }
 
   @Override
@@ -300,19 +185,33 @@ public abstract class AbstractGUI<Viewer, Item, Click, G extends GUI, Handle>
 
   @Override
   public boolean addViewer(@NotNull Viewer viewer) {
-    return read(() -> {
-      boolean cancel = openHandler.test(castThis(), viewer);
+    boolean cancel = openHandler.test(castThis(), viewer);
 
-      if (cancel) return false;
+    if (cancel) return false;
 
-      boolean added = viewers.add(viewer);
+    boolean added = viewers.add(viewer);
 
-      if (added) {
-        open(viewer, title, renderedItemsView());
-      }
+    if (added) {
+      displayGUI(viewer);
+    }
 
-      return added;
-    });
+    return added;
+  }
+
+  @Override
+  public <V> @NotNull G setProperty(@NotNull String key, @Nullable V value) {
+    properties.put(key, value);
+    return castThis();
+  }
+
+  @Override
+  public @NotNull Map<String, Object> propertiesView() {
+    return Collections.unmodifiableMap(properties);
+  }
+
+  @Override
+  public @NotNull <V> Optional<V> property(@NotNull String key) {
+    return Optional.ofNullable((V) properties.get(key));
   }
 
   @NotNull
@@ -326,98 +225,121 @@ public abstract class AbstractGUI<Viewer, Item, Click, G extends GUI, Handle>
     return (G) this;
   }
 
-  protected void write(@NotNull Runnable runnable) {
-    try {
-      writeLock.lock();
-
-      runnable.run();
-    } finally {
-      writeLock.unlock();
-    }
-  }
-
-  protected <E> E read(@NotNull Supplier<E> supplier) {
-    try {
-      readLock.lock();
-
-      return supplier.get();
-    } finally {
-      readLock.unlock();
-    }
-  }
-
-  protected abstract void sendTitleUpdate(@NotNull Component old, @NotNull Component title);
+  protected abstract void sendTitleUpdate(@NotNull Component title);
 
   protected abstract void sendSlotUpdate(int slot, @Nullable ClickableItem<Item, Click> item);
 
   protected abstract void tickerFail(@NotNull String key, @NotNull Throwable throwable);
 
-  protected abstract void open(@NotNull Viewer viewer, @NotNull Component title, @NotNull List<ClickableItem<Item, Click>> itemsView);
+  protected abstract void open(@NotNull Viewer viewer);
 
   protected abstract void close(@NotNull Viewer viewer);
 
-  protected static void checkSize(int size, @NotNull GUIDesignType type) {
-    if (size != type.capacity()) {
-      throw new IllegalArgumentException("Incompatible inventory type with gui design type");
+  private void displayGUI(@NotNull Viewer viewer) {
+    open(viewer);
+  }
+
+  /**
+   * Collect all dynamic items of the current Pagination index and
+   * the static items and render it.
+   * Null static items aren't consumed.
+   */
+  void renderContents() {
+    ItemProvider<Item, Click>[] pageItems = collectPageItems();
+
+    if (relocateItems) {
+      ItemRelocator.relocateItems(pageItems, this);
+    }
+
+    boolean checkSlotSkipping = guiRenderer.rendererList().isEmpty();
+    guiRenderer.render(pageItems,this);
+
+    int slot = 0;
+    for (@Nullable ItemProvider<Item, Click> item : pageItems) {
+      if (item != null) {
+        renderCache.renderItem(item, slot, checkSlotSkipping);
+      }
+
+      slot++;
+    }
+
+    int staticSlot = 0;
+    for (ItemProvider<Item, Click> staticItem : staticItems) {
+      if (!staticItem.isNull()) {
+        renderCache.renderItem(staticItem, staticSlot, false);
+      }
+
+      staticSlot++;
     }
   }
 
-  private void checkIndex(int index) {
-    if (index >= items.length)
-      throw new IndexOutOfBoundsException("Index is '" + index + "' but length is '" + items.length + "'");
+  private @Nullable ItemProvider<Item, Click>[] collectPageItems() {
+    @Nullable ItemProvider<Item, Click>[] items = new ItemProvider[type.capacity()];
+
+    int page = pagination.index();
+    int itemsPerPage = itemsPerPage();
+    int minRenderedIndex = page * itemsPerPage;
+    int maxRenderedIndex = (minRenderedIndex + itemsPerPage);
+
+    for (int slot = 0; slot < items.length; slot++) {
+      ItemProvider<Item, Click> item = ItemProvider.nullProvider();
+
+      int index = minRenderedIndex + slot;
+      if (index <= maxRenderedIndex && index < items().length()) {
+        item = items().getItem(index);
+      }
+
+      items[slot] = item;
+    }
+
+    return items;
   }
 
-  private void performItemAdd(int index, ClickableItem<Item, Click> item) {
-    this.items[index] = item;
+  /**
+   * Called when a GUIItemContainer is modified.
+   *
+   * @param container The container that is calling this method
+   * @param changed The changed indexes
+   */
+  void handleItemContainerChange(ItemContainer<?, ?, ?> container, Map<Integer, MutationType> changed) {
+    int page = pagination.index();
+    int itemsPerPage = itemsPerPage();
+    int minRenderedIndex = page * itemsPerPage;
+    int maxRenderedIndex = (minRenderedIndex + itemsPerPage);
 
-    int page = getIndexPage(index);
+    for (Map.Entry<Integer, MutationType> entry : changed.entrySet()) {
+      int index = entry.getKey();
+      MutationType type = entry.getValue();
 
-    if (page == pagination.index()) {
-      rendererHandler.renderByIndex(index, item);
-    }
-  }
-
-  private void performItemRemove(int index) {
-    this.items[index] = null;
-
-    int page = getIndexPage(index);
-
-    if (page == pagination.index()) {
-      rendererHandler.renderByIndex(index, null);
-    }  }
-
-  private int getIndexPage(int index) {
-    return Math.min(0, (int) Math.floor((double) index % type.capacity()) - 1);
-  }
-
-  class ItemRenderHandler {
-    private final ClickableItem<Item, Click>[] rendered;
-
-    @SuppressWarnings("unchecked")
-    public ItemRenderHandler(GUIDesignType type) {
-      this.rendered = new ClickableItem[type.capacity()];
-    }
-
-    public void render(int slot, ClickableItem<Item, Click> item) {
-      rendered[slot] = item;
-      sendSlotUpdate(slot, item);
-    }
-
-    public void renderByIndex(int index, ClickableItem<Item, Click> item) {
-      int slot = (int) Math.floor((double) index % rendered.length);
-
-      rendered[slot] = item;
-      sendSlotUpdate(slot, item);
-    }
-
-    public void renderPage(int page) {
-      int start = page * rendered.length;
-      for (int slot = 0; slot < rendered.length; slot++) {
-        int index = start + slot;
-        ClickableItem<Item, Click> item = index < items.length ? items[slot] : null;
-        rendered[slot] = item;
-        sendSlotUpdate(slot, item);
+      if (type != MutationType.REPLACE && index <= maxRenderedIndex) {
+        renderContents();
+        return;
       }
     }
+
+    for (Integer index : changed.keySet()) {
+      ItemProvider<Item, Click> item = (ItemProvider<Item, Click>) container.getItem(index);
+
+      boolean staticItem = container == staticItems;
+      if (staticItem || index >= minRenderedIndex && index <= maxRenderedIndex) {
+        int slot = staticItem ? index : getIndexSlot(index, itemsPerPage);
+        renderCache.renderItem(item, slot, !staticItem);
+      }
+    }
+  }
+
+  private void tickProviders() {
+    int slot = 0;
+    for (@NotNull ItemProvider<Item, Click> provider : renderCache) {
+      if (provider.handleTick()) {
+        sendSlotUpdate(slot, provider.lastCached());
+      }
+
+      slot++;
+    }
+  }
+
+  private static int getIndexSlot(int index, int itemsPerPage) {
+    return (int) Math.floor((double) index % itemsPerPage);
   }
 }

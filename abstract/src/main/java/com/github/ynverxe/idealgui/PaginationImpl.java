@@ -1,5 +1,6 @@
 package com.github.ynverxe.idealgui;
 
+import com.github.ynverxe.idealgui.gui.Pagination;
 import org.jetbrains.annotations.NotNull;
 
 public class PaginationImpl implements Pagination {
@@ -18,17 +19,11 @@ public class PaginationImpl implements Pagination {
 
   @Override
   public int length() {
-    int itemCount = gui.itemCount();
+    int itemCount = gui.items().length();
 
-    if (itemCount == 0) return 1;
+    int itemsPerPage = gui.itemsPerPage();
 
-    int itemsPerPage = gui.type().capacity();
-    return (int) Math.round((double) itemCount / itemsPerPage);
-  }
-
-  @Override
-  public int itemsPerPage() {
-    return gui.type().capacity();
+    return (int) Math.ceil((double) itemCount / itemsPerPage);
   }
 
   @Override
@@ -38,7 +33,7 @@ public class PaginationImpl implements Pagination {
     }
 
     this.index = index;
-    gui.rendererHandler.renderPage(index);
+    gui.renderContents();
     return this;
   }
 }

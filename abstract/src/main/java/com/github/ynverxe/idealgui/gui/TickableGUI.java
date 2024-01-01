@@ -1,6 +1,7 @@
-package com.github.ynverxe.idealgui;
+package com.github.ynverxe.idealgui.gui;
 
 import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.Contract;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -22,4 +23,14 @@ public interface TickableGUI<Viewer, Item, Click, G extends GUI, Handle>
 
   void clearTickHandlers();
 
+  @Contract("_ -> this")
+  default @NotNull G autoTick(boolean ticking) {
+    if (ticking) {
+      GUITicker.instance().addGUI(this);
+    } else {
+      GUITicker.instance().removeGUI(this);
+    }
+
+    return (G) this;
+  }
 }

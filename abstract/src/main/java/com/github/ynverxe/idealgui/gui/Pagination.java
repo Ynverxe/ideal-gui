@@ -1,4 +1,4 @@
-package com.github.ynverxe.idealgui;
+package com.github.ynverxe.idealgui.gui;
 
 import org.jetbrains.annotations.Contract;
 import org.jetbrains.annotations.NotNull;
@@ -8,8 +8,6 @@ public interface Pagination {
   int index();
 
   int length();
-
-  int itemsPerPage();
 
   @Contract("_ -> this")
   @NotNull Pagination set(int index) throws IndexOutOfBoundsException;
